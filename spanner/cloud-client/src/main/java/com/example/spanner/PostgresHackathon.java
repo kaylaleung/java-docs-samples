@@ -17,6 +17,7 @@
 package com.example.spanner;
 
 // Imports the Google Cloud client library
+import com.example.spanner.LoadCsvExample.SpannerDataTypes;
 import com.google.cloud.spanner.Mutation;
 import com.google.cloud.spanner.Mutation.WriteBuilder;
 import com.google.cloud.spanner.Spanner;
@@ -31,6 +32,7 @@ import java.nio.file.Files;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.List;
@@ -67,6 +69,7 @@ public class PostgresHackathon {
 
   public static ArrayList<SpannerDataTypes> spannerSchema = new ArrayList<>();
   public static Connection connection;
+  public static List<String> headers;
 
   /** Return the data type of the column type **/
   public static SpannerDataTypes parseSpannerDataType(String columnType) {
@@ -141,15 +144,11 @@ public class PostgresHackathon {
     System.out.println("Writing data into table...");
 
     // NOTE: Headers are currently required to be set
-    List<String> headers = parser.getHeaderNames();
-    // for (String header : headers) {
-    //   System.out.println(header);
-    // }
+    headers = parser.getHeaderNames();
 
     Iterable<CSVRecord> records = parser;
     CSVRecord dataTypes = Iterables.get(records, 0);
     for (int i = 0; i < dataTypes.size(); i++) {
-      // System.out.println(dataTypes.get(i));
       spannerSchema.add(parseSpannerDataType(dataTypes.get(i)));
     }
 
@@ -251,19 +250,20 @@ public class PostgresHackathon {
     String tableName = args[2];
     String filepath = args[3];
 
+    connection = DriverManager.getConnection(
+        String.format(
+            "jdbc:cloudspanner:/projects/%s/instances/%s/databases/%s",
+            projectId, instanceId, databaseId));
+
     // Download CSV file from Google Cloud Storage and load CSV data into spanner
-    if (cmd.getOptionValue("action").equalsIgnoreCase("TO")) {
-      if (cmd.getOptionValue("source").equalsIgnoreCase("GCS")) {
+    if (cmd.hasOption("action") && cmd.getOptionValue("action").equalsIgnoreCase("TO")) {
+      if (cmd.hasOption("source") && cmd.getOptionValue("source").equalsIgnoreCase("GCS")) {
         // Download CSV File to Local
         downloadObject(projectId, cmd.getOptionValue("bucket"), cmd.getOptionValue("object"),
             "./" + filepath);
       }
       // Write CSV file data to Cloud Spanner
       try {
-        connection = DriverManager.getConnection(
-            String.format(
-                "jdbc:cloudspanner:/projects/%s/instances/%s/databases/%s",
-                projectId, instanceId, databaseId));
 
         Reader in = new FileReader(filepath);
         CSVFormat parseFormat = setFormat(cmd);
@@ -279,8 +279,30 @@ public class PostgresHackathon {
         spanner.close();
       }
     }
-    else if (cmd.getOptionValue("action").equalsIgnoreCase("FROM")) {
-      uploadObject(projectId, cmd.getOptionValue("bucket"), cmd.getOptionValue("object"), "./" + args[3]);
+    else if (cmd.hasOption("action") && cmd.getOptionValue("action").equalsIgnoreCase("FROM")) {
+      String queryString = "SELECT * FROM " + tableName;
+      System.out.println(queryString);
+      ResultSet rs = connection.createStatement()
+          .executeQuery(queryString);
+      ResultSetMetaData metadata = rs.getMetaData();
+      int columnCount = metadata.getColumnCount();
+      System.out.println("Finish executing SELECT query.");
+
+      List<String> allColumnNames = new ArrayList<>();
+      for (int i = 1; i <= columnCount ; i++){
+        String col_name = metadata.getColumnName(i);
+        System.out.print(col_name + " ");
+        allColumnNames.add(col_name);
+      }
+      System.out.println("");
+
+      while (rs.next()) {
+        for (String col : allColumnNames) {
+          System.out.print(rs.getString(col) + " ");
+        }
+        System.out.println("");
+      }
+      // uploadObject(projectId, cmd.getOptionValue("bucket"), cmd.getOptionValue("object"), "./" + args[3]);
     }
   }
 }
