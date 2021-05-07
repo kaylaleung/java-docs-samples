@@ -22,17 +22,18 @@ import com.google.cloud.spanner.Mutation.WriteBuilder;
 import com.google.cloud.spanner.Spanner;
 import com.google.cloud.spanner.SpannerOptions;
 import com.google.cloud.spanner.jdbc.CloudSpannerJdbcConnection;
+import com.google.cloud.storage.BlobInfo;
 import com.google.common.collect.Iterables;
 import java.io.FileReader;
+import java.io.IOException;
 import java.io.Reader;
+import java.nio.file.Files;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Map;
 import org.apache.commons.cli.CommandLine;
 import org.apache.commons.cli.CommandLineParser;
 import org.apache.commons.cli.DefaultParser;
@@ -65,8 +66,6 @@ public class PostgresHackathon {
   }
 
   public static ArrayList<SpannerDataTypes> spannerSchema = new ArrayList<>();
-
-  public static Boolean hasHeader = false;
   public static Connection connection;
 
   /** Return the data type of the column type **/
@@ -131,7 +130,6 @@ public class PostgresHackathon {
     // Set parser to parse first row as headers
     if (cmd.hasOption("h") && cmd.getOptionValue("h").equalsIgnoreCase("True")) {
       parseFormat = parseFormat.withFirstRecordAsHeader();
-      hasHeader = true;
     }
     return parseFormat;
   }
@@ -144,14 +142,14 @@ public class PostgresHackathon {
 
     // NOTE: Headers are currently required to be set
     List<String> headers = parser.getHeaderNames();
-    for (String header : headers) {
-      System.out.println(header);
-    }
+    // for (String header : headers) {
+    //   System.out.println(header);
+    // }
 
     Iterable<CSVRecord> records = parser;
-
     CSVRecord dataTypes = Iterables.get(records, 0);
     for (int i = 0; i < dataTypes.size(); i++) {
+      // System.out.println(dataTypes.get(i));
       spannerSchema.add(parseSpannerDataType(dataTypes.get(i)));
     }
 
@@ -159,35 +157,31 @@ public class PostgresHackathon {
     for (CSVRecord record : records) {
       WriteBuilder builder = Mutation.newInsertOrUpdateBuilder(tableName);
       for (int i = 0; i < headers.size(); i++) {
-        System.out.println(record.get(i));
         if (record.get(i) != null) {
-              builder.set(headers.get(i)).to(Integer.parseInt(record.get(i)));
-
-              //TODO: Fix for type parsing from types entered in second row of CSV file
-          // switch (spannerSchema.get(i)) {
-          //   case BOOL:
-          //     builder.set(headers.get(i)).to(Boolean.parseBoolean(record.get(i)));
-          //     break;
-          //   case INT64:
-          //     builder.set(headers.get(i)).to(Integer.parseInt(record.get(i).trim()));
-          //     break;
-          //   case FLOAT64:
-          //     builder.set(headers.get(i)).to(Float.parseFloat(record.get(i).trim()));
-          //     break;
-          //   case STRING:
-          //     builder.set(headers.get(i)).to(record.get(i).trim());
-          //     break;
-          //   case DATE:
-          //     builder.set(headers.get(i))
-          //         .to(com.google.cloud.Date.parseDate(record.get(i).trim()));
-          //     break;
-          //   case TIMESTAMP:
-          //     builder.set(headers.get(i))
-          //         .to(com.google.cloud.Timestamp.parseTimestamp(record.get(i)));
-          //     break;
-          //   default:
-          //     System.err.print("Invalid Type. This type is not supported.");
-          // }
+          switch (spannerSchema.get(i)) {
+            case BOOL:
+              builder.set(headers.get(i)).to(Boolean.parseBoolean(record.get(i)));
+              break;
+            case INT64:
+              builder.set(headers.get(i)).to(Integer.parseInt(record.get(i).trim()));
+              break;
+            case FLOAT64:
+              builder.set(headers.get(i)).to(Float.parseFloat(record.get(i).trim()));
+              break;
+            case STRING:
+              builder.set(headers.get(i)).to(record.get(i).trim());
+              break;
+            case DATE:
+              builder.set(headers.get(i))
+                  .to(com.google.cloud.Date.parseDate(record.get(i).trim()));
+              break;
+            case TIMESTAMP:
+              builder.set(headers.get(i))
+                  .to(com.google.cloud.Timestamp.parseTimestamp(record.get(i)));
+              break;
+            default:
+              System.err.print("Invalid Type. This type is not supported.");
+          }
         }
       }
       mutations.add(builder.build());
@@ -205,7 +199,6 @@ public class PostgresHackathon {
     Storage storage = StorageOptions.newBuilder().setProjectId(projectId).build().getService();
     Blob blob = storage.get(BlobId.of(bucketName, objectName));
     blob.downloadTo(Paths.get(destFilePath));
-
     System.out.println(
         "Downloaded object "
             + objectName
@@ -213,6 +206,17 @@ public class PostgresHackathon {
             + bucketName
             + " to "
             + destFilePath);
+  }
+
+  public static void uploadObject(
+      String projectId, String bucketName, String objectName, String filePath) throws IOException {
+
+    Storage storage = StorageOptions.newBuilder().setProjectId(projectId).build().getService();
+    BlobId blobId = BlobId.of(bucketName, objectName);
+    BlobInfo blobInfo = BlobInfo.newBuilder(blobId).build();
+    storage.create(blobInfo, Files.readAllBytes(Paths.get(filePath)));
+    System.out.println(
+        "File " + filePath + " uploaded to bucket " + bucketName + " as " + objectName);
   }
 
   public static void main(String... args) throws Exception {
@@ -224,6 +228,12 @@ public class PostgresHackathon {
     opt.addOption("n", true, "String Representing Null Value");
     opt.addOption("d", true, "Character Separating Columns");
     opt.addOption("e", true, "Character To Escape");
+
+    opt.addOption("source", true, "File Location Source");
+    opt.addOption("action", true, "Specify COPY action");
+    opt.addOption("bucket", true, "Bucket Name");
+    opt.addOption("object", true, "Object Name Name");
+
     CommandLineParser clParser = new DefaultParser();
     CommandLine cmd = clParser.parse(opt, args);
 
@@ -235,31 +245,42 @@ public class PostgresHackathon {
     SpannerOptions options = SpannerOptions.newBuilder().build();
     Spanner spanner = options.getService();
     String projectId = "span-cloud-testing";
-    // downloadObject(projectId, "kaylal-bucket", "default.csv" , "./default.csv");
 
     String instanceId = args[0];
     String databaseId = args[1];
     String tableName = args[2];
     String filepath = args[3];
 
-    try {
-      connection = DriverManager.getConnection(
-          String.format(
-              "jdbc:cloudspanner:/projects/%s/instances/%s/databases/%s",
-              projectId, instanceId, databaseId));
-
-      Reader in = new FileReader(filepath);
-      CSVFormat parseFormat = setFormat(cmd);
-      CSVParser parser = CSVParser.parse(in, parseFormat);
-
-      try {
-        writeToSpanner(parser, tableName, cmd);
-      } catch (SQLException e) {
-        System.out.println(e.getMessage());
+    // Download CSV file from Google Cloud Storage and load CSV data into spanner
+    if (cmd.getOptionValue("action").equalsIgnoreCase("TO")) {
+      if (cmd.getOptionValue("source").equalsIgnoreCase("GCS")) {
+        // Download CSV File to Local
+        downloadObject(projectId, cmd.getOptionValue("bucket"), cmd.getOptionValue("object"),
+            "./" + filepath);
       }
+      // Write CSV file data to Cloud Spanner
+      try {
+        connection = DriverManager.getConnection(
+            String.format(
+                "jdbc:cloudspanner:/projects/%s/instances/%s/databases/%s",
+                projectId, instanceId, databaseId));
 
-    } finally {
-      spanner.close();
+        Reader in = new FileReader(filepath);
+        CSVFormat parseFormat = setFormat(cmd);
+        CSVParser parser = CSVParser.parse(in, parseFormat);
+
+        try {
+          writeToSpanner(parser, tableName, cmd);
+        } catch (SQLException e) {
+          System.out.println(e.getMessage());
+        }
+
+      } finally {
+        spanner.close();
+      }
+    }
+    else if (cmd.getOptionValue("action").equalsIgnoreCase("FROM")) {
+      uploadObject(projectId, cmd.getOptionValue("bucket"), cmd.getOptionValue("object"), "./" + args[3]);
     }
   }
 }
